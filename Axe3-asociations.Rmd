@@ -33,15 +33,24 @@ cytokines[, 4:16] <- lapply(cytokines[, 4:16], function(a) return(log(a)))
 # Cell counts data
 facs <- read.csv("../data/facs_counts.txt", header = T, sep = "\t")
 ## Log transformer les données facs
-facs[, 2:ncol(facs)] <- log(facs[, 2:ncol(facs)])
+facs[, 2:ncol(facs)] <- log(facs[, 2:ncol(facs)] +1)
 
 # Selection des donneurs communs aux 4 data sets
 donors <- intersect(Expr$SUBJID, cytokines$DonorId)
 donors <- intersect(donors, facs$SUBJID)
 
+# Selection des donneurs qui ont un CMV.V1!=1
+#indices <- which(ecrf$CMV.V1 == 1)
+#donors <- donors[!donors %in% indices]
+
+#ecrf[ecrf$CMV.V1==1,]
+donors=donors[!donors %in% c(173,874)]
+
 # Clean data facs and cytokines based on the donors
 cytokines <- cytokines[cytokines$DonorId %in% donors, ]
 facs <- facs[facs$SUBJID %in% donors, ]
+Expr <- Expr[Expr$SUBJID %in% donors, ]
+ecrf <- ecrf[ecrf$SUBJID %in% donors, ]
 
 # Remove unused stimulations
 cytokines <- cytokines[cytokines$StimulusName %in% Expr$Stimulus.Name, ] %>% arrange(DonorId)
@@ -50,9 +59,10 @@ cytokines <- cytokines[cytokines$StimulusName %in% Expr$Stimulus.Name, ] %>% arr
 # Charger les clusters d'intérêt
 par exemple, mais à adapter au résultat de l'axe 2
 ```{r clusters}
-Alist <-  list(GeneExpression = Expr %>% filter(Stimulus.Name == "Null") %>% select(3:562),
+Alist <-  list(GeneExpression = Expr %>% filter(Stimulus.Name == "SEB
+                                                ") %>% select(3:562),
            FACS = facs %>% select(!1),
-           Cyto = cytokines %>% filter(StimulusName == "Null") %>% select(4:16)
+           Cyto = cytokines %>% filter(StimulusName == "SEB") %>% select(4:16)
          )
 
 
@@ -67,9 +77,9 @@ CCA_comp = data.frame(Block = res.rgcca$Y)
 
 Dist_ind = 1-cor(t(CCA_comp))
 
-hrgcca <- hclust(dist(Dist_ind), method = "average")
+hrgcca <- hclust(dist(Dist_ind), method = "single")
 
-k=2
+k=2 # nombre de clusters à extraire de l'arbre de la hitmap
 cl_h <- cutree(hrgcca, k =k)
 ```
 
@@ -113,7 +123,7 @@ for(i in categorical_variables){
   # si la variable est de type caractère
     print(i)
     Tab = table(cl_h, 
-                ecrf[as.character(Expr[Expr$Stimulus.Name == "BCG",]$SUBJID), i])  
+                ecrf[as.character(Expr[Expr$Stimulus.Name == "SEB",]$SUBJID), i])  
     # print(Tab)
     # afficher les proportions
     #print(prop.table(Tab, margin=1))
@@ -131,7 +141,7 @@ Tracé des résultats du chi2
 # Compute -log10 pval et ordonner le tableau
 chi2.res <- chi2.res %>% 
             mutate(logP = -log10(padj)) %>% 
-            arrange(logP)
+            arrange(logP) 
 
 chi2.res$Variable <- factor(chi2.res$Variable, 
                             levels = unique(chi2.res$Variable))
@@ -146,21 +156,51 @@ chi2.res %>% ggplot(aes(x = logP, y = Variable)) +
 ggsave("./Chi2_Associations.pdf", width = 6, height = 8)
 ```
 
+```{r clustering apres RGCCA hm}
+# choisisser une palette, par exemple "spectral" et créez un gradient de couleurs
+myPalette <- colorRampPalette((brewer.pal(11, "Spectral")))
+
+col_age <- c(p1 = "red", p2 = "turquoise", p3 = "blue", p4 = "green", p5 = "orange")
+#  convertir un vecteur de character en vecteur numérique pour représenter les 
+sex_cat  = as.numeric(ecrf$CUISIN>=6 ) +1
+table(ecrf$CUISIN)
+
+table(ecrf[,c("CUISIN","CMV.V1")])
+heatmap.2(Dist_ind, trace = "none", col = myPalette, cexRow = 0.2, 
+    cexCol = 0.2,  ylab = c("donors"), xlab = c("donors"), ColSideColors = col_age[sex_cat])
+```
+
+
+```{r}
+heatmap.2(as.matrix(Dist_ind), 
+          trace = "none", 
+          col = myPalette, 
+          # size of row lablels
+          cexRow = 0.2, 
+          # size of column labels
+          cexCol = 0.2,  
+          ylab = c("donors"), 
+          xlab = c("donors"), 
+          margins= c(5,5)
+          )
+```
 
 # Testez les variables numériques avec une anova
 
 ```{r clustering apres RGCCA}
 continuous_variables <- setdiff(names(ecrf), categorical_variables)[-1]
+pvals<-c()
 for(i in continuous_variables){
   print(i)
   # calculer l'anova pour tester la difference de moyenne entre les groupes
-  anova_clin =  aov(ecrf[as.character(Expr[Expr$Stimulus.Name == "BCG",]$SUBJID), i] 
+  anova_clin =  aov(ecrf[as.character(Expr[Expr$Stimulus.Name == "SEB",]$SUBJID), i] 
                     ~ as.factor(cl_h))
   # visualiser le résultat
   print(summary(anova_clin))
+  pvals<-c(pvals,unlist(summary(anova_clin)[[1]])[9])
   print(TukeyHSD(anova_clin))
   # tracer un boxplot pour visualiser les résultats
-  df_plot <- data.frame(cbind(var = ecrf[as.character(Expr[Expr$Stimulus.Name == "BCG",]$SUBJID), i],
+  df_plot <- data.frame(cbind(var = ecrf[as.character(Expr[Expr$Stimulus.Name == "SEB",]$SUBJID), i],
                               cluster=as.factor(cl_h)
                               )
                         )
@@ -184,5 +224,16 @@ for(i in continuous_variables){
   
   print(plt.violin)
 }
+ inds <-which(pvals<0.05)
+```
+```{r}
+# Créer un tableau de contingence
+contingency_table <- table(ecrf$CUISIN, ecrf$SEX)
+
+# Effectuer le test du chi2
+chi2_test <- chisq.test(contingency_table)
+
+# Afficher les résultats du test
+print(chi2_test)
 ```
 
