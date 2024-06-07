@@ -1,0 +1,529 @@
+---
+title: "Clustering, RGCCA et Associations"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+# include=FALSE : aucun output ne sera affiché dans le pdf
+knitr::opts_chunk$set(echo = TRUE, tidy.opts = list(width.cutoff = 60), tidy = TRUE)
+
+# Adaptez le chemin vers les données si besoin 
+library(dplyr)
+library(tidyr)
+# install.packages("RGCCA")
+# install.packages("UpSetR")
+# install.packages("gplots")
+library(FactoMineR)
+library(factoextra)
+library(RGCCA)
+library(data.table)
+library(gplots)
+#library(GGally)
+library(cluster)
+library(RColorBrewer)
+library(UpSetR)
+```
+
+# Charger le jeu de données des niveaux d'ARNm
+
+```{r chargement des donnees, cache = TRUE}
+## Adaptez le chemin vers les données si besoin
+#setwd("./Code_data")
+Expr <- as.data.frame(fread("../data/nanostring.txt"))
+ecrf <- read.delim("../data/eCRF.txt")
+row.names(ecrf) = ecrf$SUBJID
+ecrf <- ecrf[ecrf$SUBJID %in% Expr$SUBJID, ] 
+
+# Cytokines data
+cytokines <- read.csv("../data/cytokines.csv", sep = ";", header = T)
+# Log transfomer les données
+## Conversion en numerique
+cytokines[, 4:16] <- lapply(cytokines[, 4:16], as.numeric)
+## Application de la transformation log
+#cytokines[, 4:16] <- lapply(cytokines[, 4:16], function(a) return(log2(a + 1)))
+cytokines[, 4:16] <- lapply(cytokines[, 4:16], function(a) return(log(a)))
+
+# Cell counts data
+facs <- read.csv("../data/facs_counts.txt", header = T, sep = "\t")
+## Log transformer les données facs
+#facs[, 2:ncol(facs)] <- log2(facs[, 2:ncol(facs)] + 1)
+facs[, 2:ncol(facs)] <- log(facs[, 2:ncol(facs)] + 1)
+#facs[, 2:ncol(facs)] <- log(facs[, 2:ncol(facs)])
+
+# Selection des donneurs communs aux 4 data sets
+donors <- intersect(Expr$SUBJID, cytokines$DonorId)
+donors <- intersect(donors, facs$SUBJID)
+
+# Clean data facs and cytokines based on the donors
+cytokines <- cytokines[cytokines$DonorId %in% donors, ]
+facs <- facs[facs$SUBJID %in% donors, ]
+
+# Remove unused stimulations
+#cytokines <- cytokines[cytokines$StimulusName %in% Expr$Stimulus.Name, ] %>% arrange(DonorId)
+```
+
+## Créer des groupes d'individus par rapport à leur réponse immunitaires
+
+```{r indmap}
+# selectionner les variables de chaque table pour une stimulation donnée
+Expr_null = Expr[as.character(Expr$Stimulus.Name)=="Null",]
+cytokines_null = cytokines[as.character(cytokines$StimulusName)=="Null",]
+
+# Fusionners les tables en un seul jeu de données
+# expression et cytokines
+dataset <- merge(Expr_null, cytokines_null, by.x = "SUBJID", by.y = "DonorId")
+#avec les données de facs
+dataset <- merge(dataset, facs, by.x = "SUBJID", by.y = "SUBJID")
+
+# Extraire les 20 variables les plus variants à travers tous le jeu de données
+sorted_vector <- sort(apply(dataset[,-1], 2, var), decreasing=TRUE)
+top_var  <- names(sorted_vector)[1:20] 
+
+# Calculer la matrice des distances
+Dist_ind <-  dist(dataset[,top_var], method = "euclidean")
+
+# to see the different distance methods
+?dist
+
+# définir hclust
+hclust <- hclust(Dist_ind, method = "ward.D2")
+
+top_var
+# autres distances d'intéret: euclidian, manhattan, canberra
+# Dist_ind = as.matrix(dist(Expr_wide[,top_var_gene], method = "canberra"))
+```
+
+```{r indmap_1}
+# choisir une palette, par exemple "spectral" et créer un gradient de couleurs
+myPalette <- colorRampPalette(rev(brewer.pal(11, "Spectral")))
+
+# Tracer une heatmap
+heatmap.2(as.matrix(Dist_ind), 
+          trace = "none", 
+          col = myPalette, 
+          # size of row lablels
+          cexRow = 0.2, 
+          # size of column labels
+          cexCol = 0.2,  
+          ylab = c("donors"), 
+          xlab = c("donors"), 
+          margins= c(5,5)
+          )
+
+# pour voir plus d'arguments
+# ?heatmap.2
+
+```
+
+```{r plot dendrogram}
+#  tracer le dendrogram réalisé avec la méthode "average"
+hclust_expr <- hclust(dist(Dist_ind), method = "average")
+plot(hclust_expr)
+
+#  tracer le dendrogram réalisé avec la méthode "ward"
+#La méthode de ward.D2 est similaire à la méthode de Ward mais les dissimilarités sont mises au carré avant de réaliser le clustering.
+hclust_expr <- hclust(dist(Dist_ind), method = "ward.D2")
+plot(hclust_expr)
+
+```
+
+Calculer la "silhouette" pour plusieurs valeurs de k afin de choisir celle qui donne la meilleure séparation des individus
+
+```{r test de plusieurs valeur pour le nombre de cluster}
+for(k in 2:8){
+  cl_h <- cutree(hclust_expr, k =k)
+  silh = silhouette(cl_h, dist(Dist_ind))
+  print(mean(silh[,3]))
+}
+```
+
+Tracer la silhouette pour le nombre de clusters optimal.
+
+```{r plot silhouette}
+cl_h <- cutree(hclust_expr, k =3)
+silh = silhouette(cl_h, dist(Dist_ind))
+plot(silh, border="NA")
+```
+
+# Exemple d'application de RGCCA
+
+Dans cet exemple, nous allons considérer qu'un bloc est constiuté par un Stimulus.Name. Nous aurons donc 7 blocs différents contenant chacun autant de lignes (les donneurs) et de colonnes (les gènes).
+
+## Construction du jeu de données
+
+Les données en entrée de RGCCA doivent être présentées sous la forme d'une liste contenant les différents blocs ayant le même nombre de lignes (chaque ligne de chaque bloc doit correspondre au même "individu"). Vérifiez que les dimensions des différents blocs sont bien les mêmes ! Un bloc correspond à un ensemble de variables qui sont liées entre elles. Dans notre cas, on définit un bloc pour chaque stimulation.
+
+```{r datalist}
+A <-  list(GeneExpression = Expr %>% filter(Stimulus.Name == "SEB") %>% select(3:562),
+           Cells = facs %>% select(!1),
+           Cytokines = cytokines %>% filter(StimulusName == "SEB") %>% select(4:16)
+           )
+```
+
+## Matrice de design
+
+La matride dite de "design" représente les liens que nous voulons imposer lors de l'analyse : les composantes estimées par RGCCA seront estimées de sorte à maximiser la covariance (ou la corrélation) identifiées par la matrice de design.
+
+Dans notre cas, nous allons imposer la maximisation de toutes les corrélations.
+
+```{r design}
+# definir où placer les 1 et les 0 dans la matrice de design
+desmat <- 1 - diag(3)
+
+# # ou bien une matrice de design customisée
+# C <- matrix(c(0, 0, 1,
+#               0, 0, 1,
+#               1, 1, 0), 
+#              nrow=3, ncol=3)
+ 
+# ajouter les noms de lignes et de colonnes
+dimnames(desmat) <- list(names(A),
+                         names(A))
+
+corrplot::corrplot(desmat)
+desmat
+```
+
+## Application de RGCCA
+
+RGCCA est une méthode itérative qui permet d'estimer les composantes résumant l'inertie de chaque bloc tout en maximisant les corrélations définies dans la matrice de design. Par défaut, la méthode réalisera un diagnostic de l'algorithme itératif représenté sous forme de graphe.
+
+```{r RGCCA}
+res.rgcca <- rgcca(blocks = A, 
+                   connection = desmat,
+                  # si on veut ajouter de la sparsité
+                    # sparsity = rep(.2, 7),  
+                  # paramètre de régularisation 
+                  # varie de 0 (maximise la corrélation) 
+                  # à 1 (maximise la covariance)
+                   tau = 1,
+                  # nombre de composantes par bloc
+                   ncomp = 2, 
+                  # fonction appliquée à la maximisation de la covariance
+                   scheme = "factorial", 
+                  # chaque bloc est-il réduit ?
+                   scale_block = T, 
+                  # type d'initialisation
+                   init = "svd",
+                  # orthogonal block components or orthogonal block weight vectors
+                   comp_orth = T,
+                  # pour voir la progression de l'algorithme
+                   verbose = T)
+
+#pour voir les détails des arguments
+# ?rgcca 
+
+print(res.rgcca)
+#print(fit)
+
+```
+
+## Visualisation
+
+Les résultats de RGCCA sont complexes à visualiser avec un seul graphe. Une possibilité est de tracer chaque composante en fonction de chacunes des autres pour visualiser les correlations.
+
+```{r pair plot}
+# Les résultats de RGCCA sont complexes à visualiser avec un seul graphe. 
+# Une possibilité est de tracer chaque composante en fonction de chacune des 
+# autres pour visualiser les corrélations.
+
+CCA_comp = data.frame(Block = res.rgcca$Y)
+
+GGally::ggpairs(CCA_comp) # la fonction pairs fonctionne aussi si besoin
+
+#Pour lire la matrice de graphe : en abscisse, on l’axe d’un des blocs (celui associé à la ligne) (= d’une des stimulations) et en ordonnées l’axe du seconde bloc (celui associé à la colonne)
+```
+
+RGCCA a trouvé pour chaque paire de stimulations une combinaison linéaire de gènes qui corrèlent avec les combinaisons de toutes les autres paires.
+
+```{r}
+#Réaliser différentes représentations graphiques à partir du résultat de RGCCA
+# pour toutes les stimulations
+plot(res.rgcca, type ="sample", comp = 1:1)
+
+plot(res.rgcca, type ="sample", block=3)
+
+plot(res.rgcca, type ="weight", block = 1:3, nmark=100, display_order = T)
+
+plot(res.rgcca, type = "cor_circle", block = 1, comp = 1:2, display_blocks = 1:2, cex = 1, repel = TRUE)
+
+plot(res.rgcca, type = "biplot", block = 1,  comp = 1:2, repel = T, cex = 1)
+
+ #pour les blocs E. coli et SEB uniquement
+plot(res.rgcca, block = 1:2, 
+     comp = 1, 
+     n_mark = 30000, 
+     display_order = T, 
+     cex = .3)
+
+plot(res.rgcca, type = "ave", cex = 2)
+```
+
+Quelle est la part de variance expliquée par les premières composantes de chacun des blocs ? Quelles sont les variables qui permettent de maximiser la covariance (ou la corrélation) en fonction de différentes matrices de design?
+
+## Quels sont les variables inclus dans ces combinaisons?
+
+Récupèrer les gènes les plus informatifs à travers les stimulations
+
+```{r Récupèrer les variables les plus explicatives}
+Top_variables = list()
+block_order =  names(A)
+
+# pour chaque stimulation récupérer les variables avec les coefficients les plus 
+# élevés pour chaque composantes
+for(i in 1:3){ 
+  df <- as.data.frame(res.rgcca$a[[i]]) %>% 
+                      mutate(sumabs = abs(V1) + abs(V2))
+
+  index_order <- order(df$sumabs, decreasing = TRUE)
+  
+  if (i == 1){ # Top genes
+    Top_variables[[block_order[i]]] = sort(names(Expr[,-c(1:2)])[index_order[1:50]]) 
+  }
+  else if (i == 2){ # Top cell types
+    Top_variables[[block_order[i]]] = sort(names(facs[,-c(1)])[index_order[1:20]]) 
+  }
+  else{ # Top cytokines
+    Top_variables[[block_order[i]]] = sort(names(cytokines[,-c(1:3)])[index_order[1:10]]) 
+  }
+  
+}
+
+# Afficher la liste des top genes
+Top_variables
+```
+
+## Regrouper les individus par rapport aux composantes de rgcca
+
+Calculer une distance basée sur les composantes de RGCCA.
+
+```{r Compute a distance based on RgCCA components}
+Dist_ind = 1-cor(t(CCA_comp))
+# Dist_ind
+```
+
+```{r clustering apres RGCCA hm}
+# choisisser une palette, par exemple "spectral" et créez un gradient de couleurs
+myPalette <- colorRampPalette((brewer.pal(11, "Spectral")))
+
+col_age <- c(p1 = "red", p2 = "turquoise", p3 = "blue", p4 = "green", p5 = "orange")
+#  convertir un vecteur de character en vecteur numérique pour représenter les 
+sex_cat  = as.numeric(ecrf$TABAC.T1 > 1) + 1
+
+heatmap.2(Dist_ind, trace = "none", col = myPalette, cexRow = 0.2, 
+    cexCol = 0.2,  ylab = c("donors"), xlab = c("donors"), ColSideColors = col_age[sex_cat])
+```
+
+```{r clustering apres RGCCA}
+hrgcca <- hclust(dist(Dist_ind), method = "average")
+```
+
+Calculer la "silhouette" pour plusieurs valeurs de k afin de choisir celle qui donne la meilleure séparation des individus
+
+```{r test de plusieurs valeur pour le nombre de cluster apres cluster}
+for(k in 2:8){
+  cl_h <- cutree(hrgcca, k =k)
+  silh <- silhouette(cl_h, dist(Dist_ind))
+  print(mean(silh[,3]))
+}
+```
+
+Extraire des groupes d’individus dont les réponses sont similaires (se baser sur la forme des dendrogrammes et les coefficients de silhouette pour les choisir).
+
+```{r clustering apres RGCCA silhouette}
+cl_h <- cutree(hrgcca, k =3)
+silh = silhouette(cl_h, dist(Dist_ind))
+plot(silh, border="NA")
+```
+
+Comparer les clusters et les listes de obtenus avec ceux obtenus avant utilisation de RGCCA.
+
+# A votre tour
+
+Pour l'instant, nous avons fait l'étude multi-blocs pour la stimulation Null. Selon la stimulation assigné à votre groupe, refaire les analyses et explorer les données pour cette stimulation.
+
+Piste d'exploration: Utiliser RGCCA en mode supervisé pour identifier les liens avec une variable d’intérêt que vous choisirez.
+
+```{r}
+# selectionner les variables de chaque table pour la stimulation SEB
+Expr_SEB = Expr[as.character(Expr$Stimulus.Name)=="SEB",]
+cytokines_SEB = cytokines[as.character(cytokines$StimulusName)=="SEB",]
+
+# Fusionners les tables en un seul jeu de données
+# expression et cytokines
+dataset_SEB <- merge(Expr_SEB, cytokines_SEB, by.x = "SUBJID", by.y = "DonorId")
+#avec les données de facs
+dataset_SEB <- merge(dataset_SEB, facs, by.x = "SUBJID", by.y = "SUBJID")
+
+# Extraire les 20 variables les plus variants à travers tous le jeu de données
+sorted_vector_SEB <- sort(apply(dataset_SEB[,-1], 2, var), decreasing=TRUE)
+top_var_SEB<- names(sorted_vector_SEB)[1:20]
+
+# Calculer la matrice des distances
+Dist_ind_SEB <- dist(dataset_SEB[,top_var_SEB], method = "euclidean")
+
+# définir hclust
+hclust_SEB <- hclust(Dist_ind_SEB, method = "ward.D2")
+
+# Tracer le dendrogramme
+plot(hclust_SEB)
+
+```
+
+```{r}
+for(k in 2:8){
+cl_h_SEB <- cutree(hclust_SEB, k =k)
+silh_SEB <- silhouette(cl_h_SEB, dist(Dist_ind_SEB))
+print(mean(silh_SEB[,3]))
+}
+
+```
+
+```{r}
+cl_h_SEB <- cutree(hclust_SEB, k =3)
+silh_SEB <- silhouette(cl_h_SEB, dist(Dist_ind_SEB))
+plot(silh_SEB, border="NA")
+
+```
+
+```{r}
+A_SEB <- list(GeneExpression = Expr_SEB %>% select(3:562),
+Cells = facs %>% select(!1),
+Cytokines = cytokines_SEB %>% select(4:16)
+)
+
+A_SEB <-  list(GeneExpression = Expr %>% filter(Stimulus.Name == "SEB") %>% select(3:562),
+           Cells = facs %>% select(!1),
+           Cytokines = cytokines %>% filter(StimulusName == "SEB") %>% select(4:16)
+           )
+
+```
+
+```{r}
+# definir où placer les 1 et les 0 dans la matrice de design
+desmat_SEB <- 1 - diag(3)
+
+# matrice de design customisée
+# C <- matrix(c(0, 0, 1,
+#   0, 0, 1,
+#   1, 1, 0),
+#   nrow=3, ncol=3)
+
+# ajouter les noms de lignes et de colonnes
+dimnames(desmat_SEB) <- list(names(A_SEB),
+  names(A_SEB))
+
+corrplot::corrplot(desmat_SEB)
+desmat_SEB
+```
+
+```{r}
+res.rgcca_SEB <- rgcca(blocks = A_SEB,
+  connection = desmat_SEB,
+  # si on veut ajouter de la sparsité
+  # sparsity = rep(.2, 7),
+  # paramètre de régularisation
+  # varie de 0 (maximise la corrélation)
+  # à 1 (maximise la covariance)
+  tau = 1,
+  # nombre de composantes par bloc
+  ncomp = 2,
+  # fonction appliquée à la maximisation de la covariance
+  scheme = "factorial",
+  # chaque bloc est-il réduit ?
+  scale_block = T,
+  # type d'initialisation
+  init = "svd",
+  # orthogonal block components or orthogonal block weight vectors
+  comp_orth = T,
+  # pour voir la progression de l'algorithme
+  verbose = T)
+
+#pour voir les détails des arguments
+# ?rgcca
+
+print(res.rgcca_SEB)
+
+```
+
+```{r}
+# Les résultats de RGCCA sont complexes à visualiser avec un seul graphe.
+# Une possibilité est de tracer chaque composante en fonction de chacune des
+# autres pour visualiser les corrélations.
+
+CCA_comp_SEB = data.frame(Block = res.rgcca_SEB$Y)
+
+GGally::ggpairs(CCA_comp_SEB) # la fonction pairs fonctionne aussi si besoin
+
+#Pour lire la matrice de graphe : en abscisse, on l’axe d’un des blocs (celui associé à la ligne) (= d’une des stimulations) et en ordonnées l’axe du seconde bloc (celui associé à la colonne)
+
+```
+
+```{r}
+#Réaliser différentes représentations graphiques à partir du résultat de RGCCA
+# pour toutes les stimulations
+plot(res.rgcca_SEB, type ="sample", comp = 1:1)
+
+plot(res.rgcca_SEB, type ="sample", block=3)
+
+plot(res.rgcca_SEB, type ="weight", block = 1:2, nmark=100, display_order = F)
+
+plot(res.rgcca_SEB, type = "cor_circle", block = 1, comp = 1:2, display_blocks = 1:2, cex = 1, repel = TRUE)
+
+plot(res.rgcca_SEB, type = "biplot", block = 1,comp = 1:2, repel = T, cex = 1)
+
+#pour les blocs E. coli et SEB uniquement
+plot(res.rgcca_SEB, block = 1:2,
+   comp = 1,
+   n_mark = 30000,
+   display_order = F,
+   cex = .3)
+
+plot(res.rgcca_SEB, type = "ave", cex = 2)
+
+```
+
+```{r}
+Top_variables_SEB = list()
+block_order_SEB = names(A_SEB)
+
+# pour chaque stimulation récupérer les variables avec les coefficients les plus
+# élevés pour chaque composantes
+for(i in 1:3){
+  df_SEB <- as.data.frame(res.rgcca_SEB$a[[i]]) %>%
+  mutate(sumabs = abs(V1) + abs(V2))
+  
+  index_order_SEB <- order(df_SEB$sumabs, decreasing = TRUE)
+  
+  if (i == 1){ # Top genes
+    Top_variables_SEB[[block_order_SEB[i]]] = sort(names(Expr[,-c(1:2)])[index_order_SEB[1:50]])
+  }
+  else if (i == 2){ # Top cell types
+    Top_variables_SEB[[block_order_SEB[i]]] = sort(names(facs[,-c(1)])[index_order_SEB[1:20]])
+  }
+  else{ # Top cytokines
+    Top_variables_SEB[[block_order_SEB[i]]] = sort(names(cytokines[,-c(1:3)])[index_order_SEB[1:10]])
+  }
+
+}
+
+Top_variables_SEB
+
+```
+
+```{r}
+Dist_ind_SEB = 1-cor(t(CCA_comp_SEB))
+
+myPalette <- colorRampPalette((brewer.pal(11, "Spectral")))
+
+col_age <- c(p1 = "red", p2 = "turquoise", p3 = "blue", p4 = "green", p5 = "orange")
+
+sex_cat= as.numeric(ecrf$SEX == 1) + 1
+
+heatmap.2(Dist_ind_SEB, trace = "none", col = myPalette, cexRow = 0.2,
+cexCol = 0.2,ylab = c("donors"), xlab = c("donors"), ColSideColors = col_age[sex_cat])
+
+```

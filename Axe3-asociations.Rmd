@@ -1,0 +1,188 @@
+---
+title: "Axe3_Associations"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(ggplot2)
+library(RGCCA)
+library(tidyr)
+library(dplyr)
+```
+
+# Charger le jeu de données des niveaux d'ARNm
+
+```{r chargement des donnees, cache = TRUE}
+## Adaptez le chemin vers les données si besoin
+#setwd("./Code_data")
+Expr <- as.data.frame(fread("../data/nanostring.txt"))
+ecrf <- read.delim("../data/eCRF.txt")
+row.names(ecrf) = ecrf$SUBJID
+ecrf <- ecrf[ecrf$SUBJID %in% Expr$SUBJID, ] 
+
+# Cytokines data
+cytokines <- read.csv("../data/cytokines.csv", sep = ";", header = T)
+# Log transfomer les données
+## Conversion en numerique
+cytokines[, 4:16] <- lapply(cytokines[, 4:16], as.numeric)
+## Application de la transformation log
+cytokines[, 4:16] <- lapply(cytokines[, 4:16], function(a) return(log(a)))
+
+# Cell counts data
+facs <- read.csv("../data/facs_counts.txt", header = T, sep = "\t")
+## Log transformer les données facs
+facs[, 2:ncol(facs)] <- log(facs[, 2:ncol(facs)])
+
+# Selection des donneurs communs aux 4 data sets
+donors <- intersect(Expr$SUBJID, cytokines$DonorId)
+donors <- intersect(donors, facs$SUBJID)
+
+# Clean data facs and cytokines based on the donors
+cytokines <- cytokines[cytokines$DonorId %in% donors, ]
+facs <- facs[facs$SUBJID %in% donors, ]
+
+# Remove unused stimulations
+cytokines <- cytokines[cytokines$StimulusName %in% Expr$Stimulus.Name, ] %>% arrange(DonorId)
+```
+
+# Charger les clusters d'intérêt
+par exemple, mais à adapter au résultat de l'axe 2
+```{r clusters}
+Alist <-  list(GeneExpression = Expr %>% filter(Stimulus.Name == "Null") %>% select(3:562),
+           FACS = facs %>% select(!1),
+           Cyto = cytokines %>% filter(StimulusName == "Null") %>% select(4:16)
+         )
+
+
+desmat <- 1 - diag(3)
+dimnames(desmat) <- list(names(Alist),
+                         names(Alist))
+corrplot::corrplot(desmat)
+
+res.rgcca <- rgcca(Alist, desmat)
+
+CCA_comp = data.frame(Block = res.rgcca$Y)
+
+Dist_ind = 1-cor(t(CCA_comp))
+
+hrgcca <- hclust(dist(Dist_ind), method = "average")
+
+k=2
+cl_h <- cutree(hrgcca, k =k)
+```
+
+# Associations entre les groupes détéctés et les  variables de l'eCRF
+
+Tester les variables catégorielles avec une table de contingence et un test du chi2
+
+```{r clustering}
+# L’hypothèse nulle est : 
+# la répartition de la caractéristique est la même dans les 2 clusters. 
+# Par exemple, si l’on choisit la variable catégorielle “smoking”, 
+# rejeter l’hypothèse nulle, avec un risque de 5% de se tromper, 
+# c’est considérer que les individus d’un des clusters sont plus souvent fumeurs 
+# que les individus de l’autre cluster. 
+# L'hypothèse nulle  est rejettée lorsque la p_value < 0.05.
+
+categorical_variables <- c("BATCHID","SEASON","SEX","CHEVEUX","CORREC",
+                           "CORRECP","LOG","PHYSL","PHYSP.T1","VILLENPOP20",
+                           "VILLESPOP20","VIT","VIT.COUPLE","VIT.ENFANTS","YEUX.T1",
+                           "NVILLES", "PHYSJ","BRUIT","CSP","EMPLOIP","EMPLOIS",
+                           "INACT","NIVETUD","POUSS","PTOX","REVENUS","TRAVJ",
+                           "TRAVT","AMIDI","DEJ","DINER","GRIGN","MATIN","NCOLL",
+                           "PDEJ","PRODALL1","PRODALL2","PRODALL3","PRODALL4",
+                           "REPASH","SEL","SOIREE","ALCF","BIERE", "CUISIN",
+                           "DESS","DIFFATM","FASTF","FCRUS","FCUITS","FECUL",
+                           "FRITS","FROM","PLATC","RESTAU","VIANDE","VIENN",
+                           "VIN","VITA","VORALE","PSEXP","TABAC.T1", 
+                           "DORDIF","DORLUM","HASCHICH","STRESS","CONCEN","DIFF",
+                           "FATI","ACCOUNB","ALIMDUR","TONSILLECTOMY","APPENDICECTOMY",
+                           "OTHER","MEASLES","HEPATITISB","FLU","MEASLESMH","RUBELLAMH",
+                           "CHICKENPOXMH","MUMPSMH","OTHERMH","SURGICAL.INT","MUMPS",
+                           "RUBELLA","CMSEQ","ALLER","ATTAQUE","CAUTRE","CCOLON","CSEIN","DIABETE",
+                           "HYPERT","INFARC","CMV.V1","EBV.EA.V1","EBV.EBNA.V1","HBS.V1","HP.V1",
+                           "HSV1.V1","HSV2.V1","ORE.V1","ROUG.V1","TXP.V1","VZV.V1")
+
+# pour chaque critère de la table de données eCRF
+chi2.res <- data.frame(Variable = categorical_variables,
+                       pval = 0)
+
+for(i in categorical_variables){ 
+  # si la variable est de type caractère
+    print(i)
+    Tab = table(cl_h, 
+                ecrf[as.character(Expr[Expr$Stimulus.Name == "BCG",]$SUBJID), i])  
+    # print(Tab)
+    # afficher les proportions
+    #print(prop.table(Tab, margin=1))
+    # afficher le résultat du test du Chi2
+    #print(chisq.test(Tab))
+    chi2.res[chi2.res$Variable == i, "pval"] <- chisq.test(Tab)$p.value
+}
+
+chi2.res$padj <- p.adjust(chi2.res$pval, method = "fdr")
+```
+
+Tracé des résultats du chi2
+
+```{r}
+# Compute -log10 pval et ordonner le tableau
+chi2.res <- chi2.res %>% 
+            mutate(logP = -log10(padj)) %>% 
+            arrange(logP)
+
+chi2.res$Variable <- factor(chi2.res$Variable, 
+                            levels = unique(chi2.res$Variable))
+
+chi2.res %>% ggplot(aes(x = logP, y = Variable)) + 
+              geom_bar(stat = "identity", fill = "cornflowerblue") +
+              geom_vline(xintercept = -log10(0.05), linetype = "dashed") +
+              theme_classic() + 
+              xlab("-log10(FDR)") +
+              ylab("Variables") +
+              theme(axis.text=element_text(size=6))
+ggsave("./Chi2_Associations.pdf", width = 6, height = 8)
+```
+
+
+# Testez les variables numériques avec une anova
+
+```{r clustering apres RGCCA}
+continuous_variables <- setdiff(names(ecrf), categorical_variables)[-1]
+for(i in continuous_variables){
+  print(i)
+  # calculer l'anova pour tester la difference de moyenne entre les groupes
+  anova_clin =  aov(ecrf[as.character(Expr[Expr$Stimulus.Name == "BCG",]$SUBJID), i] 
+                    ~ as.factor(cl_h))
+  # visualiser le résultat
+  print(summary(anova_clin))
+  print(TukeyHSD(anova_clin))
+  # tracer un boxplot pour visualiser les résultats
+  df_plot <- data.frame(cbind(var = ecrf[as.character(Expr[Expr$Stimulus.Name == "BCG",]$SUBJID), i],
+                              cluster=as.factor(cl_h)
+                              )
+                        )
+  plt <- ggplot(df_plot, aes(x=as.factor(cluster), y=var, color = as.factor(cluster))) + 
+             geom_boxplot() + 
+             geom_jitter(alpha = 0.3) +
+             theme_classic() +
+             xlab("Cluster") +
+             labs(color = "Cluster") +
+             ylab(i)
+  
+  print(plt)
+  
+  plt.violin <- ggplot(df_plot, aes(x=as.factor(cluster), y=var, fill = as.factor(cluster))) + 
+                 geom_violin() + 
+                 geom_boxplot(color = "black", width = 0.1) +
+                 theme_classic() +
+                 xlab("Cluster") +
+                 labs(fill = "Cluster") +
+                 ylab(i)
+  
+  print(plt.violin)
+}
+```
+

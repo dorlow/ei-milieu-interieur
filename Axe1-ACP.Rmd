@@ -1,0 +1,327 @@
+---
+title: "Analyse en Composantes Principales et Classification"
+date: '`r Sys.Date()`'
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(factoextra)
+library(FactoMineR)
+library(data.table)
+library(ggplot2)
+```
+
+# Charger le jeu de données des niveaux d'ARNm
+
+```{r chargement des donnees}
+## Adaptez le chemin vers les données si besoin
+Expr <- as.data.frame(fread("../data/nanostring.txt"))
+ecrf <- read.delim("../data/eCRF.txt")
+row.names(ecrf) = ecrf$SUBJID
+
+#head(ecrf)
+dim(ecrf)
+
+#head(Expr)
+dim(Expr)
+```
+
+## Créer un jeu de données pairés
+
+Les individus présents dans `Expr` et `ecrf`, ne sont pas exactement les mêmes, certains individus présents dans `ecrf` ne sont pas présents dans `Expr`. Pour y remédier, nous allons sélectionner les individus présents dans `Expr` qui sont aussi présents dans `ecrf`.
+
+```{r}
+ecrf <- ecrf[ecrf$SUBJID %in% Expr$SUBJID, ] # %in% operator permet de tester l'appartenance d'un élément ou ensemble d'éléments dans un vecteur.
+```
+
+# Comprendre la structure des données 
+
+Quel est le nombre de colonnes et de lignes ? Quelles sont les informations stockées en lignes, en colonnes ? 
+
+5701 ligne, 137 colonnes
+
+# ACP
+
+Réaliser un ACP avec la fonction PCA de factoMineR (option de chunk `cache = TRUE` pour gagner du temps).
+
+```{r pca, cache = TRUE}
+respca <- PCA(Expr, scale. = TRUE, graph=FALSE, quali.sup=1:2)
+```
+
+Regardez ce que contient le résultat `respca`
+
+```{r view}
+#View(respca)
+```
+
+A quoi correspondent les différents attributs de `respca`.
+
+## Carte des individus pour toutes les stimulations
+
+Représenter les échantillons selon les deux premières composantes. Colorer les points en fonction des stimulations ou du sexe. Visualiser les données selon les 3e et 4e composantes principales. Quelle(s) stimulation(s) semble(nt) induire la  réponse immune la plus distincte ? Comparer cette figure avec celle obtenue dans Piasecka et al., PNAS 2018
+
+```{r indmap}
+fviz_pca_ind(
+  respca,
+  habillage = as.factor(Expr$Stimulus.Name),
+  invisible = 'quali',
+  label = "none"
+)
+# ?fviz_pca_ind
+```
+
+### Carte des individus par stimulation
+
+Selectionner les niveaux d'expression des gènes pour une stimulation. Représenter les échantillons selon les deux premières composantes. Quels sont les gènes qui contribuent le plus à la séparation des individus pour cette stimulation ?
+
+Voici un exemple sur la condition non stimulée "Null"
+
+```{r}
+expr_null = Expr[as.character(Expr$Stimulus.Name)=="Null",] # Selectionner une stimulation, par exemple E. coli
+respca_null <- PCA(expr_null, scale. = TRUE, graph=FALSE, quali.sup=1:2) # Calculer l'ACP pour cette stimulation
+```
+
+
+```{r}
+? fviz_pca_biplot
+fviz_pca_biplot(
+  respca_null,
+  habillage = as.factor(ecrf[as.character(expr_null$SUBJID),"SEX"]),
+  invisible = 'quali',
+  label = "var", select.var=list(cos2=0.6), repel = TRUE
+)
+```
+
+# Extraire les 20 gènes qui contribuent le plus à la séparation des individus pour ces stimulations
+
+```{r}
+# Accéder à la contribution de chaque gènes sur les 5 première composantes
+#View(respca$var$cos2)
+
+# Sélectionner le nombre de dimensions sur lesquelles on veut s'intéresser à la contribution des gènes
+components <- c(1:2) # Vous pouvez modifier ce paramètre selon les dimensions d'intérêt
+
+# Sélectionner la contribution des gènes pour ces composantes
+contrib <- respca$var$cos2[, components]
+
+# Récupérer les 20 premiers gènes qui contribuent le plus pour les composantes d'intérêt
+top20_genes <- names(sort(apply(contrib, 1, sum), decreasing = TRUE)[1:20])
+
+# Eventuellement, sauvegarder le résultat dans un fichier texte
+write(top20_genes, file="./PCA_Top20Genes.txt")
+```
+
+# Autre façon de plot l'ACP
+
+Une façon alternative de faire des plots sur R avec le package `ggplot2`
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# Extraire les coordonnées de la projectiond de l'ACP
+pca_coord <- as.data.frame(respca$ind$coord)
+
+# Ajouter SUBJID et les stimulations aux résultats pour faciliter le plot
+pca_coord[, c("SUBJID", "Stimulations")] <- Expr[, c('SUBJID', 'Stimulus.Name')]
+
+# Plot avec ggplot2
+p <- ggplot(pca_coord, aes(x = Dim.1, y = Dim.2, color = Stimulations)) +
+      geom_point() +
+      xlab("Dim1") + 
+      ylab("Dim2") +
+      theme_linedraw() 
+print(p)
+
+# Améliorer le plot avec d'autres informations
+
+## Extraire les informations de variances expliquées
+pca_var <- as.data.frame(respca$eig)
+pc1_var <- format(pca_var$`percentage of variance`[1], digits = 4)
+pc2_var <- format(pca_var$`percentage of variance`[2], digits = 4)
+
+### Modification des titres d'axes
+
+p <- p + 
+      xlab(paste("Dim1 (", pc1_var, "%)", sep = "")) +
+      ylab(paste("Dim2 (", pc2_var, "%)", sep = ""))
+print(p)
+
+## Extraire informations sur les donneurs
+pca_coord <- merge(pca_coord, ecrf[, c("SUBJID", "SEX")], by.x = "SUBJID", by.y = "SUBJID")
+pca_coord <- pca_coord %>% mutate(SEX = ifelse(SEX == 2, "female", "male"))
+
+p <- ggplot(pca_coord, aes(x = Dim.1, y = Dim.2, color = Stimulations, shape = SEX)) +
+      geom_point(size = 0.8) +
+      xlab("Dim1") + 
+      ylab("Dim2") +
+      theme_linedraw() 
+print(p)
+```
+
+# A vous de jouer
+
+On peut appliquer les mêmes méthodes sur d'autres jeux de données. Ici, on vous demande de reconduire l'analyse mais cette fois sur les données Cytokines ou Cellulaires.
+
+## Importer et transformer les données de cytokines
+
+```{r}
+# Chargement des données
+cytokines <- read.csv("../data/cytokines.csv", sep = ";", header = T)
+ecrf <- read.delim("../data/eCRF.txt")
+ecrf <- ecrf[ecrf$SUBJID %in% cytokines$DonorId, ]
+
+# Log transfomer les données
+## Conversion en numerique
+cytokines[, 4:16] <- lapply(cytokines[, 4:16], as.numeric)
+## Application de la transformation log
+cytokines[, 4:16] <- lapply(cytokines[, 4:16], function(a) return(log(a)))
+
+
+```
+
+## Perform PCA
+
+```{r}
+cytokines_mod <- cytokines[, !(names(cytokines) %in% "BatchId")]
+respca_cytokine <- PCA(cytokines_mod, scale. = TRUE, graph=FALSE, quali.sup=1:2)
+```
+
+## Réaliser les graphes de l'ACP.
+
+Ploter les échantillons et les colorer par stimulations.
+
+```{r}
+fviz_pca_ind(
+  respca_cytokine,
+  habillage = as.factor(cytokines_mod$StimulusName),
+  invisible = 'quali',
+  label = "none"
+)
+```
+
+Effectuer le Bi-Plot
+
+```{r}
+fviz_pca_biplot(
+  respca_cytokine,
+  habillage = as.factor(ecrf[as.character(cytokines_mod$DonorId),"SEX"]),
+  invisible = 'quali',
+  label = "var", select.var=list(cos2=0.6), repel = TRUE
+)
+```
+### Carte des individus par stimulation
+
+Selectionner les niveaux de cytokines pour une stimulation. Représenter les échantillons selon les deux premières composantes. Quels sont les cytokines qui contribuent le plus à la séparation des individus pour cette stimulation ?
+
+Voici un exemple sur la condition non stimulée "Null"
+
+```{r}
+cytokines_stim = cytokines_mod[as.character(cytokines_mod$StimulusName)=="SEB",] # Selectionner une stimulation, par exemple E. coli
+cytokines_stim_pca <- PCA(cytokines_stim, scale. = TRUE, graph=FALSE, quali.sup=1:2) # Calculer l'ACP pour cette stimulation
+```
+
+
+```{r}
+fviz_pca_biplot(
+  cytokines_stim_pca,
+  habillage = as.factor(ecrf[as.character(cytokines_stim$DonorId),"SEX"]),
+  invisible = 'quali',
+  label = "var", select.var=list(cos2=0.6), repel = TRUE
+)
+```
+# Extraire les 5 cytokines qui contribuent le plus
+
+```{r}
+# Sélectionner le nombre de dimensions sur lesquelles on veut s'intéresser à la contribution des gènes
+components <- c(1:2)
+
+# Sélectionner la contribution des gènes pour ces composantes
+contrib_SEB <- cytokines_stim_pca$var$cos2[, components]
+
+# Récupérer es 20 premiers gènes qui contribuent le plus pour les composantes d'intérêt
+top5_cytokines_SEB <- names(sort(apply(contrib_SEB, 1, sum), decreasing = TRUE)[1:5])
+
+# Eventuellement, sauvegarder le résultat dans un fichier texte
+write(top5_cytokines_SEB, file="./PCA_Top5Cytokines_SEB.txt")
+
+# Sélectionner la contribution des gènes pour ces composantes
+contrib <- respca_cytokine$var$cos2[, components]
+
+# Récupérer es 20 premiers gènes qui contribuent le plus pour les composantes d'intérêt
+top5_cytokines <- names(sort(apply(contrib, 1, sum), decreasing = TRUE)[1:5])
+
+# Eventuellement, sauvegarder le résultat dans un fichier texte
+write(top5_cytokines, file="./PCA_Top5Cytokines.txt")
+```
+## Faire de même avec les données cellulaires (attention il y a des données manquantes dans la table, pour ne pas perdre trop de données vous pouvez par exemple éliminer les colonnes qui contiennent plus de 30% de données manquantes puis supprimer les individus pour lesquels il reste des données manquantes).
+```{r}
+# Chargement des données
+cellules <- as.data.frame(fread("../data/facs_counts.txt"))
+ecrf <- read.delim("../data/eCRF.txt")
+```
+# Log transfomer les données
+## Conversion en numerique
+```{r}
+na_percentage <- colSums(is.na(cellules)) / nrow(cellules)
+
+columns_to_keep <- names(na_percentage[na_percentage <= 0.3])
+
+cellules_mod <- cellules[, columns_to_keep]
+
+cellules_mod <- cellules_mod[complete.cases(cellules_mod), ]
+
+ecrf <- ecrf[ecrf$SUBJID %in% cellules_mod$SUBJID, ]
+
+respca_cellules <- PCA(cellules_mod, scale. = TRUE, graph=FALSE, quali.sup=1:1)
+
+fviz_pca_ind(
+  respca_cellules,
+  # habillage = as.factor(cellules$StimulusName),
+  invisible = 'quali',
+  label = "none"
+)
+
+fviz_pca_biplot(
+  respca_cellules,
+  habillage = as.factor(ecrf[as.character(cellules_mod$SUBJID),"AGE"]),
+  invisible = 'quali',
+  label = "var", select.var=list(cos2=0.6), repel = TRUE
+)
+```
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# Extraire les coordonnées de la projectiond de l'ACP
+pca_coord <- as.data.frame(respca_cellules$ind$coord)
+
+# Ajouter SUBJID et les stimulations aux résultats pour faciliter le plot
+pca_coord[, c("SUBJID")] <- cellules_mod[, c('SUBJID')]
+pca_coord <- merge(pca_coord, ecrf[, c("SUBJID", "AGE")], by.x = "SUBJID", by.y = "SUBJID")
+
+# Plot avec ggplot2
+p <- ggplot(pca_coord, aes(x = Dim.1, y = Dim.2, color = AGE)) +
+      geom_point() +
+      xlab("Dim1") + 
+      ylab("Dim2") +
+      theme_linedraw() +
+      scale_color_gradient(low = "blue", high = "red")
+
+# Améliorer le plot avec d'autres informations
+
+## Extraire les informations de variances expliquées
+pca_var <- as.data.frame(respca$eig)
+pc1_var <- format(pca_var$`percentage of variance`[1], digits = 4)
+pc2_var <- format(pca_var$`percentage of variance`[2], digits = 4)
+
+### Modification des titres d'axes
+
+p <- p + 
+      xlab(paste("Dim1 (", pc1_var, "%)", sep = "")) +
+      ylab(paste("Dim2 (", pc2_var, "%)", sep = ""))
+print(p)
+```

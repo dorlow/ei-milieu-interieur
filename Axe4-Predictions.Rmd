@@ -1,0 +1,154 @@
+---
+title: "Axe4 - Features Selections et Prédictions"
+output: html_document
+date: "2023-05-23"
+---
+
+```{r}
+# Setup et importation de packages
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+#install.packages("randomForest")
+library(randomForest)
+library(pROC)
+```
+
+Si vos résultats s'y prêtent, vous pouvez essayer de prédire une variable de l’eCRF à partir des données cellulaires, cytokiniques ou d’expression.
+
+```{r}
+ecrf <- read.delim("../data/eCRF.txt")
+cytokines <- read.csv("../data/cytokines.csv", sep = ";", header = T)
+facs <- read.csv("../data/facs_counts.txt", header = T, sep = "\t")
+Expr <- as.data.frame(fread("../data/nanostring.txt"))
+```
+
+```{r}
+cytokines = cytokines[as.character(cytokines$StimulusName)=="SEB",]
+Expr = Expr[as.character(Expr$Stimulus.Name)=="SEB",]
+cytokines[, 4:16] <- lapply(cytokines[, 4:16], as.numeric)
+cytokines[, 4:16] <- lapply(cytokines[, 4:16], function(a) return(log(a)))
+row.names(ecrf) = ecrf$SUBJID
+facs[, 2:ncol(facs)] <- log(facs[, 2:ncol(facs)] + 1)
+ecrf <- ecrf[ecrf$SUBJID %in% cytokines$DonorId, ] 
+ecrf <- ecrf[ecrf$SUBJID %in% facs$SUBJID, ] 
+facs <- facs[facs$SUBJID %in% ecrf$SUBJID, ] 
+facs <- facs[facs$SUBJID %in% cytokines$DonorId, ] 
+Expr <- Expr[Expr$SUBJID %in% ecrf$SUBJID, ] 
+Expr <- Expr[Expr$SUBJID %in% cytokines$DonorId, ]
+cytokines <- cytokines[cytokines$DonorId %in% ecrf$SUBJID, ] 
+cytokines <- cytokines[cytokines$DonorId %in% facs$SUBJID, ] 
+```
+
+```{r}
+ecrf <-   select(ecrf, SUBJID, SEX)
+donors <- merge(ecrf, cytokines, by.x = "SUBJID", by.y = "DonorId")
+donors <- merge(donors, facs, by.x = "SUBJID", by.y = "SUBJID")
+donors <- merge(donors, Expr, by.x = "SUBJID", by.y = "SUBJID")
+donors %>% filter(!is.na(N_CD56hi.panel4)) %>% # Supprime les lignes qui contiennent des NA pour ce type cellulaire
+       ggplot(aes(x = N_CD56hi.panel4)) +
+       geom_histogram(aes(y = ..density..), position = "identity", bins = 20, fill = "cornflowerblue") +
+       theme_classic() +
+       xlab("# CD56hi") +
+       ylab("Density")
+donors <- donors[rowSums(is.na(donors)) <= 9, ]
+donors <- subset(donors, select = -SUBJID)
+```
+
+```{r}
+replace_na_with_mean <- function(df) {
+  for (i in seq_along(df)) {
+    if (is.numeric(df[[i]])) {
+      df[[i]][is.na(df[[i]])] <- mean(df[[i]], na.rm = TRUE)
+    }
+  }
+  return(df)
+}
+
+# Apply the function to the train dataframe
+donors <- replace_na_with_mean(donors)
+names(donors) <- gsub("-", "", names(donors))
+```
+
+```{r}
+set.seed(42)
+
+# On découpe le jeu de données en 70% de training et 30% de test
+sample <- sample(c(TRUE, FALSE), nrow(donors), replace=TRUE, prob=c(0.7,0.3))
+train  <- donors[sample, ]
+test   <- donors[!sample, ]
+```
+
+```{r}
+nfeatures <- ncol(train) - 1
+# mtry <- max(floor(nfeatures/3), 1) 
+mtry <- floor(sqrt(nfeatures))
+
+rf.fit <- randomForest(as.factor(SEX) ~ ., 
+                       data = train,
+                       ntree = 1000, 
+                       mtry = mtry,
+                       importance = T, na.action = na.omit)
+
+print(rf.fit)
+```
+
+```{r}
+rf_prediction <- predict(rf.fit, test, type = "prob")
+
+predicted.classes.rf <- colnames(rf_prediction)[apply(rf_prediction, 1, which.max)]
+
+mean(predicted.classes.rf == test$SEX, na.rm = T) # Accuracy du modèle
+```
+
+```{r}
+df.importance <- data.frame(MDA = importance(rf.fit)[, "MeanDecreaseAccuracy"]) %>% 
+                 arrange(desc(MDA)) # On ordonne les importances de la plus haute à la plus basse
+
+df.importance$parametres <- factor(rownames(df.importance), 
+                              levels = rownames(df.importance), 
+                              ordered = T)
+df.importance <- head(df.importance, 30)
+
+df.importance %>% ggplot(aes(x = parametres, y = MDA)) +
+                  geom_bar(stat="identity", fill = "cornflowerblue") +
+                  ggtitle(paste("Features Importance for to predict age")) +
+                  theme_classic() +
+                  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 8))
+```
+
+```{r}
+lparams <- df.importance %>% filter(MDA > 7) %>% pull(parametres)
+
+new.train <- train %>% select(c(lparams, "SEX"))
+new.test <- test %>% select(c(lparams, "SEX"))
+
+nf.new <- ncol(new.train) - 1
+# mtry <- max(floor(nfeatures/3), 1) 
+new.mtry <- floor(sqrt(nf.new))
+
+rf.fit.sub <- randomForest(as.factor(SEX) ~ ., 
+                       data = new.train,
+                       ntree = 1000, 
+                       mtry = new.mtry,
+                       importance = T, na.action = na.omit)
+
+print(rf.fit.sub)
+```
+
+```{r}
+rf_prediction.sub <- predict(rf.fit.sub, new.test, type = "prob")
+
+predicted.classes.rf <- colnames(rf_prediction.sub)[apply(rf_prediction.sub, 1, which.max)]
+
+mean(predicted.classes.rf == new.test$SEX, na.rm = T) # Accuracy du modèle
+
+ROC_rf.sub <- roc(new.test$SEX, rf_prediction.sub[,2])
+ROC_rf_auc.sub <- auc(ROC_rf.sub) # Area under the curve
+print(ROC_rf_auc.sub)
+plot(ROC_rf.sub, col = "green", 
+     main = "ROC for Random Forest - sous ensemble",
+     sub = paste("Area under the curve:", formatC(ROC_rf_auc.sub, digit = 2),
+     xlim = c(1,0), ylim = c(0,1)))
+```
