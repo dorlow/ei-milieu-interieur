@@ -42,7 +42,7 @@ cytokines <- cytokines[cytokines$DonorId %in% facs$SUBJID, ]
 ```
 
 ```{r}
-ecrf <-   select(ecrf, SUBJID, SEX)
+ecrf <-   select(ecrf, SUBJID, AGE)
 donors <- merge(ecrf, cytokines, by.x = "SUBJID", by.y = "DonorId")
 donors <- merge(donors, facs, by.x = "SUBJID", by.y = "SUBJID")
 donors <- merge(donors, Expr, by.x = "SUBJID", by.y = "SUBJID")
@@ -54,6 +54,7 @@ donors %>% filter(!is.na(N_CD56hi.panel4)) %>% # Supprime les lignes qui contien
        ylab("Density")
 donors <- donors[rowSums(is.na(donors)) <= 9, ]
 donors <- subset(donors, select = -SUBJID)
+donors <- subset(donors, select = -BatchId)
 ```
 
 ```{r}
@@ -85,7 +86,7 @@ nfeatures <- ncol(train) - 1
 # mtry <- max(floor(nfeatures/3), 1) 
 mtry <- floor(sqrt(nfeatures))
 
-rf.fit <- randomForest(as.factor(SEX) ~ ., 
+rf.fit <- randomForest(as.factor(round(AGE/10)*10) ~ ., 
                        data = train,
                        ntree = 1000, 
                        mtry = mtry,
@@ -99,7 +100,7 @@ rf_prediction <- predict(rf.fit, test, type = "prob")
 
 predicted.classes.rf <- colnames(rf_prediction)[apply(rf_prediction, 1, which.max)]
 
-mean(predicted.classes.rf == test$SEX, na.rm = T) # Accuracy du modèle
+mean(predicted.classes.rf == round(test$AGE/10)*10, na.rm = T) # Accuracy du modèle
 ```
 
 ```{r}
@@ -119,16 +120,16 @@ df.importance %>% ggplot(aes(x = parametres, y = MDA)) +
 ```
 
 ```{r}
-lparams <- df.importance %>% filter(MDA > 7) %>% pull(parametres)
+lparams <- df.importance %>% filter(MDA > 2) %>% pull(parametres)
 
-new.train <- train %>% select(c(lparams, "SEX"))
-new.test <- test %>% select(c(lparams, "SEX"))
+new.train <- train %>% select(c(lparams, "AGE"))
+new.test <- test %>% select(c(lparams, "AGE"))
 
 nf.new <- ncol(new.train) - 1
 # mtry <- max(floor(nfeatures/3), 1) 
 new.mtry <- floor(sqrt(nf.new))
 
-rf.fit.sub <- randomForest(as.factor(SEX) ~ ., 
+rf.fit.sub <- randomForest(as.factor(round(AGE/10)*10) ~ ., 
                        data = new.train,
                        ntree = 1000, 
                        mtry = new.mtry,
@@ -142,9 +143,9 @@ rf_prediction.sub <- predict(rf.fit.sub, new.test, type = "prob")
 
 predicted.classes.rf <- colnames(rf_prediction.sub)[apply(rf_prediction.sub, 1, which.max)]
 
-mean(predicted.classes.rf == new.test$SEX, na.rm = T) # Accuracy du modèle
+mean(predicted.classes.rf == round(new.test$AGE/10)*10, na.rm = T) # Accuracy du modèle
 
-ROC_rf.sub <- roc(new.test$SEX, rf_prediction.sub[,2])
+ROC_rf.sub <- roc(new.test$AGE, rf_prediction.sub[,2])
 ROC_rf_auc.sub <- auc(ROC_rf.sub) # Area under the curve
 print(ROC_rf_auc.sub)
 plot(ROC_rf.sub, col = "green", 
